@@ -510,6 +510,11 @@ class PairwiseMoEParticleTransformer(nn.Module):
         self.cls_blocks = nn.ModuleList([Block(**cfg_cls_block) for _ in range(num_cls_layers)])
         self.norm = nn.LayerNorm(embed_dim)
 
+        self.layer_pair_mixers = nn.ModuleList([
+            nn.Linear(num_heads, num_heads) for _ in range(num_layers)
+        ])
+        self.gamma = nn.Parameter(torch.ones(num_layers) * 0.01)
+
         if fc_params is not None:
             fcs = []
             in_dim = embed_dim
@@ -542,16 +547,16 @@ class PairwiseMoEParticleTransformer(nn.Module):
                     uu = build_sparse_tensor(uu, uu_idx, x.size(-1))
             x, v, mask, uu = self.trimmer(x, v, mask, uu)
             padding_mask = ~mask.squeeze(1)  # (N, P)
+            seq_len = mask.size(-1)
 
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # input embedding
             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
             base_attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
-                base_attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
+                base_attn_mask = self.pair_embed(v, uu)  # (Batch, num_heads, P, P)
 
             if v is not None:
-                seq_len = v.size(-1)
                 xi = v.unsqueeze(-1).expand(-1, -1, -1, seq_len)
                 xj = v.unsqueeze(-2).expand(-1, -1, seq_len, -1)
                 raw_physics = pairwise_lv_fts(xi, xj, num_outputs=4)
@@ -576,7 +581,7 @@ class PairwiseMoEParticleTransformer(nn.Module):
             ]
 
             for i, block in enumerate(self.blocks):
-                layer_attn_mask = base_attn_mask
+                layer_attn_mask_flat = None
 
                 if base_attn_mask is not None and v is not None:
                     if i < len(threshold_schedule):
@@ -589,18 +594,29 @@ class PairwiseMoEParticleTransformer(nn.Module):
                     
                     valid_mask = (ln_delta_r > ln_min) & (ln_delta_r < ln_max)
 
+                    active_real_pairs = valid_mask & real_2d_mask   
+
                     with torch.no_grad():
-                        active_real_pairs = valid_mask & real_2d_mask
                         fraction_active = (active_real_pairs.sum().float() / total_real_pairs).item()
                         self._current_sparsities[f'layer_{i}_active_fraction'] = fraction_active
-                    
-                    valid_mask = valid_mask.repeat_interleave(block.num_heads, dim=0)
-                    
-                    u_active_band = base_attn_mask.masked_fill(~valid_mask, 0.0)
-                    
-                    layer_attn_mask = base_attn_mask + u_active_band
 
-                x = block(x, x_cls=None, padding_mask=padding_mask, attn_mask=layer_attn_mask)
+                    base_attn_permuted = base_attn_mask.permute(0, 2, 3, 1)
+
+                    active_features = base_attn_permuted[active_real_pairs]
+                    transformed_features = self.layer_pair_mixers[i](active_features)
+
+                    u_active_band = torch.zeros_like(base_attn_permuted)
+                    u_active_band[active_real_pairs] = transformed_features
+
+                    u_active_band = u_active_band.permute(0, 3, 1, 2)
+
+                    layer_attn_mask = base_attn_mask + (self.gamma[i] * u_active_band)
+
+                    layer_attn_mask_flat = layer_attn_mask.view(-1, seq_len, seq_len)
+                elif base_attn_mask is not None:
+                    layer_attn_mask_flat = base_attn_mask.view(-1, seq_len, seq_len)
+
+                x = block(x, x_cls=None, padding_mask=padding_mask, attn_mask=layer_attn_mask_flat)
 
             # extract class token
             cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
