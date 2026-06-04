@@ -53,7 +53,7 @@ if ((TRAIN_PERCENTAGE == 1)); then
     NUM_WORKERS=1
 fi
 
-epochs=100
+epochs=50
 samples_per_epoch=$(((TRAIN_PERCENTAGE * 1000 * 1024) / (10 * NGPUS) ))
 samples_per_epoch_val=$((10000 * 128))
 dataopts="--num-workers $NUM_WORKERS --fetch-step 0.01"
@@ -106,10 +106,10 @@ $CMD \
     "ZToQQ:${DATADIR}/test_20M/ZToQQ_*.root" \
     "ZJetsToNuNu:${DATADIR}/test_20M/ZJetsToNuNu_*.root" \
     --data-config dataset/JetClass/JetClass_${FEATURE_TYPE}.yaml --network-config $modelopts \
-    --model-prefix ${OUTPUT_VOL_DIR}/training/JetClass/Pythia/${FEATURE_TYPE}/${MODEL_NAME}/{auto}${suffix}/net \
+    --model-prefix ${OUTPUT_VOL_DIR}/training/JetClass/Pythia/${FEATURE_TYPE}/${MODEL_NAME}/${suffix}/net \
     $dataopts $batchopts \
     --samples-per-epoch ${samples_per_epoch} --samples-per-epoch-val ${samples_per_epoch_val} --num-epochs $epochs --gpus 0 \
-    --optimizer ranger --log ${OUTPUT_VOL_DIR}/logs/JetClass_Pythia_${FEATURE_TYPE}_${MODEL_NAME}_{auto}${suffix}.log \
-    --predict-output ${OUTPUT_VOL_DIR}/results/JetClass_Pythia_${FEATURE_TYPE}_${MODEL_NAME}${suffix}/pred.root \
-    --tensorboard JetClass_Pythia_${FEATURE_TYPE}_${MODEL_NAME}${suffix} \
+    --optimizer ranger --log ${OUTPUT_VOL_DIR}/logs/${MODEL_NAME}/JetClass_Pythia_${FEATURE_TYPE}_${MODEL_NAME}_${suffix}.log \
+    --predict-output ${OUTPUT_VOL_DIR}/results/${MODEL_NAME}/JetClass_Pythia_${FEATURE_TYPE}_${MODEL_NAME}_${suffix}/pred.root \
+    --tensorboard ${MODEL_NAME}/JetClass_Pythia_${FEATURE_TYPE}_${MODEL_NAME}_${suffix} \
     "${WEAVER_ARGS[@]}"
