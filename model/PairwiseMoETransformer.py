@@ -549,90 +549,89 @@ class PairwiseMoEParticleTransformer(nn.Module):
             padding_mask = ~mask.squeeze(1)  # (N, P)
             seq_len = mask.size(-1)
 
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
-            # input embedding
-            x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
-            base_attn_mask = None
-            if (v is not None or uu is not None) and self.pair_embed is not None:
-                base_attn_mask = self.pair_embed(v, uu)  # (Batch, num_heads, P, P)
+        # input embedding
+        x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
+        base_attn_mask = None
+        if (v is not None or uu is not None) and self.pair_embed is not None:
+            base_attn_mask = self.pair_embed(v, uu)  # (Batch, num_heads, P, P)
 
-            if v is not None:
-                xi = v.unsqueeze(-1).expand(-1, -1, -1, seq_len)
-                xj = v.unsqueeze(-2).expand(-1, -1, seq_len, -1)
-                raw_physics = pairwise_lv_fts(xi, xj, num_outputs=4)
-                ln_delta_r = raw_physics[:, 2, :, :]
+        if v is not None:
+            xi = v.unsqueeze(-1).expand(-1, -1, -1, seq_len)
+            xj = v.unsqueeze(-2).expand(-1, -1, seq_len, -1)
+            raw_physics = pairwise_lv_fts(xi, xj, num_outputs=4)
+            ln_delta_r = raw_physics[:, 2, :, :]
 
-            with torch.no_grad():
-                real_nodes = mask.squeeze(1).bool()  # (Batch, P)
-                real_2d_mask = real_nodes.unsqueeze(-1) & real_nodes.unsqueeze(-2) # (Batch, P, P)
-                total_real_pairs = real_2d_mask.sum().float().clamp(min=1.0)
-            
-            self._current_sparsities = {}
+        with torch.no_grad():
+            real_nodes = mask.squeeze(1).bool()  # (Batch, P)
+            real_2d_mask = real_nodes.unsqueeze(-1) & real_nodes.unsqueeze(-2) # (Batch, P, P)
+            total_real_pairs = real_2d_mask.sum().float().clamp(min=1.0)
+        
+        self._current_sparsities = {}
 
-            threshold_schedule = [
-                (0.0, 0.1),  # Layer 0: Immediate collinear splittings
-                (0.05, 0.2), # Layer 1: Expanding micro-physics
-                (0.1, 0.4),  # Layer 2: Sub-subjet structures
-                (0.2, 0.6),  # Layer 3: Subjet clustering
-                (0.4, 0.8),  # Layer 4: Inter-subjet routing (radius scale)
-                (0.6, 1.2),  # Layer 5: Global topology (cross-jet)
-                (0.8, 1.6),  # Layer 6: Extreme global / opposite edges
-                (0.8, 99.0)  # Layer 7: Safety catch-all for boundary pairs
-            ]
+        threshold_schedule = [
+            (0.0, 0.1),  # Layer 0: Immediate collinear splittings
+            (0.05, 0.2), # Layer 1: Expanding micro-physics
+            (0.1, 0.4),  # Layer 2: Sub-subjet structures
+            (0.2, 0.6),  # Layer 3: Subjet clustering
+            (0.4, 0.8),  # Layer 4: Inter-subjet routing (radius scale)
+            (0.6, 1.2),  # Layer 5: Global topology (cross-jet)
+            (0.8, 1.6),  # Layer 6: Extreme global / opposite edges
+            (0.8, 99.0)  # Layer 7: Safety catch-all for boundary pairs
+        ]
 
-            for i, block in enumerate(self.blocks):
-                layer_attn_mask_flat = None
+        for i, block in enumerate(self.blocks):
+            layer_attn_mask_flat = None
 
-                if base_attn_mask is not None and v is not None:
-                    if i < len(threshold_schedule):
-                        min_thresh, max_thresh = threshold_schedule[i]
-                    else:
-                        min_thresh, max_thresh = (0.0, 99.0)
-                    
-                    ln_min = math.log(min_thresh) if min_thresh > 0 else -math.inf
-                    ln_max = math.log(max_thresh)
-                    
-                    valid_mask = (ln_delta_r > ln_min) & (ln_delta_r < ln_max)
+            if base_attn_mask is not None and v is not None:
+                if i < len(threshold_schedule):
+                    min_thresh, max_thresh = threshold_schedule[i]
+                else:
+                    min_thresh, max_thresh = (0.0, 99.0)
+                
+                ln_min = math.log(min_thresh) if min_thresh > 0 else -math.inf
+                ln_max = math.log(max_thresh)
+                
+                valid_mask = (ln_delta_r > ln_min) & (ln_delta_r < ln_max)
 
-                    active_real_pairs = valid_mask & real_2d_mask   
+                active_real_pairs = valid_mask & real_2d_mask   
 
-                    with torch.no_grad():
-                        fraction_active = (active_real_pairs.sum().float() / total_real_pairs).item()
-                        self._current_sparsities[f'layer_{i}_active_fraction'] = fraction_active
+                with torch.no_grad():
+                    fraction_active = (active_real_pairs.sum().float() / total_real_pairs).item()
+                    self._current_sparsities[f'layer_{i}_active_fraction'] = fraction_active
 
-                    base_attn_permuted = base_attn_mask.permute(0, 2, 3, 1)
+                base_attn_permuted = base_attn_mask.permute(0, 2, 3, 1)
 
-                    active_features = base_attn_permuted[active_real_pairs]
-                    transformed_features = self.layer_pair_mixers[i](active_features)
+                active_features = base_attn_permuted[active_real_pairs]
+                transformed_features = self.layer_pair_mixers[i](active_features)
 
-                    u_active_band = torch.zeros_like(base_attn_permuted)
-                    u_active_band[active_real_pairs] = transformed_features
+                u_active_band = torch.zeros_like(base_attn_permuted)
+                u_active_band[active_real_pairs] = transformed_features
 
-                    u_active_band = u_active_band.permute(0, 3, 1, 2)
+                u_active_band = u_active_band.permute(0, 3, 1, 2)
 
-                    layer_attn_mask = base_attn_mask + (self.gamma[i] * u_active_band)
+                layer_attn_mask = base_attn_mask + (self.gamma[i] * u_active_band)
 
-                    layer_attn_mask_flat = layer_attn_mask.view(-1, seq_len, seq_len)
-                elif base_attn_mask is not None:
-                    layer_attn_mask_flat = base_attn_mask.view(-1, seq_len, seq_len)
+                layer_attn_mask_flat = layer_attn_mask.view(-1, seq_len, seq_len)
+            elif base_attn_mask is not None:
+                layer_attn_mask_flat = base_attn_mask.view(-1, seq_len, seq_len)
 
-                x = block(x, x_cls=None, padding_mask=padding_mask, attn_mask=layer_attn_mask_flat)
+            x = block(x, x_cls=None, padding_mask=padding_mask, attn_mask=layer_attn_mask_flat)
 
-            # extract class token
-            cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
-            for block in self.cls_blocks:
-                cls_tokens = block(x, x_cls=cls_tokens, padding_mask=padding_mask)
+        # extract class token
+        cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
+        for block in self.cls_blocks:
+            cls_tokens = block(x, x_cls=cls_tokens, padding_mask=padding_mask)
 
-            x_cls = self.norm(cls_tokens).squeeze(0)
+        x_cls = self.norm(cls_tokens).squeeze(0)
 
-            # fc
-            if self.fc is None:
-                return x_cls
-            output = self.fc(x_cls)
-            if self.for_inference:
-                output = torch.softmax(output, dim=1)
-            # print('output:\n', output)
-            return output
+        # fc
+        if self.fc is None:
+            return x_cls
+        output = self.fc(x_cls)
+        if self.for_inference:
+            output = torch.softmax(output, dim=1)
+        # print('output:\n', output)
+        return output
 
 
 class ParticleTransformerTagger(nn.Module):
@@ -706,12 +705,11 @@ class ParticleTransformerTagger(nn.Module):
             v = torch.cat([pf_v, sv_v], dim=2)
             mask = torch.cat([pf_mask, sv_mask], dim=2)
 
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
-            pf_x = self.pf_embed(pf_x)  # after embed: (seq_len, batch, embed_dim)
-            sv_x = self.sv_embed(sv_x)
-            x = torch.cat([pf_x, sv_x], dim=0)
+        pf_x = self.pf_embed(pf_x)  # after embed: (seq_len, batch, embed_dim)
+        sv_x = self.sv_embed(sv_x)
+        x = torch.cat([pf_x, sv_x], dim=0)
 
-            return self.part(x, v, mask)
+        return self.part(x, v, mask)
 
 
 class ParticleTransformerTaggerWithExtraPairFeatures(nn.Module):
@@ -792,9 +790,8 @@ class ParticleTransformerTaggerWithExtraPairFeatures(nn.Module):
             uu = torch.zeros(v.size(0), pf_uu.size(1), v.size(2), v.size(2), dtype=v.dtype, device=v.device)
             uu[:, :, :pf_x.size(2), :pf_x.size(2)] = pf_uu
 
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
-            pf_x = self.pf_embed(pf_x)  # after embed: (seq_len, batch, embed_dim)
-            sv_x = self.sv_embed(sv_x)
-            x = torch.cat([pf_x, sv_x], dim=0)
+        pf_x = self.pf_embed(pf_x)  # after embed: (seq_len, batch, embed_dim)
+        sv_x = self.sv_embed(sv_x)
+        x = torch.cat([pf_x, sv_x], dim=0)
 
-            return self.part(x, v, mask, uu)
+        return self.part(x, v, mask, uu)
