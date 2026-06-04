@@ -58,7 +58,7 @@ samples_per_epoch=$(((TRAIN_PERCENTAGE * 1000 * 1024) / (10 * NGPUS) ))
 samples_per_epoch_val=$((10000 * 128))
 dataopts="--num-workers $NUM_WORKERS --fetch-step 0.01"
 
-modelopts="model/${MODEL_NAME}.py --use-amp"
+modelopts="model/${MODEL_NAME}.py --use-amp --amp-dtype bf16"
 batchopts="--batch-size 512 --start-lr 1e-3"
 
 if ! [[ "${FEATURE_TYPE}" =~ ^(full|kin|kinpid)$ ]]; then
