@@ -512,9 +512,9 @@ class PairwiseMoEParticleTransformer(nn.Module):
 
 
         mu_init = [-3.0, -2.5, -1.8, -1.2, -0.6, 0.0, 0.5, 1.0]
-        self.layer_mu = nn.Parameter(torch.tensor(mu_init))
-        self.layer_sigma = nn.Parameter(torch.ones(num_layers) * 0.5)
-        self.gamma = nn.Parameter(torch.ones(num_layers) * 0.01)
+        self.layer_mu = nn.Parameter(torch.tensor(mu_init), requires_grad=True)
+        self.layer_sigma = nn.Parameter(torch.ones(num_layers) * 0.5, requires_grad=True)
+        self.gamma = nn.Parameter(torch.ones(num_layers) * 0.01, requires_grad=True)
 
         self.num_experts = 4
         self.layer_routers = nn.ModuleList([
@@ -599,7 +599,7 @@ class PairwiseMoEParticleTransformer(nn.Module):
 
                 base_attn_permuted = base_attn_mask.permute(0, 2, 3, 1)
                 active_features = base_attn_permuted[active_real_pairs]
-                active_weights = gaussian_weight[active_real_pairs].unsqueeze(-1)
+                active_weights = gaussian_weight[active_real_pairs].unsqueeze(-1).to(active_features.dtype)
 
                 routing_logits = self.layer_routers[i](active_kinematics)
                 routing_probs = torch.sigmoid(routing_logits)
@@ -617,7 +617,7 @@ class PairwiseMoEParticleTransformer(nn.Module):
                     expert_out = self.layer_experts[i][e](active_features)
                     mixed_features += expert_out * routing_probs[:, e:e+1]
                     
-                weighted_features = mixed_features * active_weights * self.gamma[i]
+                weighted_features = mixed_features * active_weights * self.gamma[i].to(active_features.dtype)
 
                 u_active_band = torch.zeros_like(base_attn_permuted)
                 u_active_band[active_real_pairs] = weighted_features
